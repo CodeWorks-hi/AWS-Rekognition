@@ -10,7 +10,23 @@ bucket = "rekognition-codekookiz"
 s3 = boto3.client('s3')
 
 
-# S3에 신규 이미지 추가
+def extract_face_bytes(image_bytes):
+    image = Image.open(BytesIO(image_bytes))
+    response = rekognition.detect_faces(Image={'Bytes': image_bytes}, Attributes=['DEFAULT'])
+    if not response['FaceDetails']:
+        return None, 'No face detected'
+    box = response['FaceDetails'][0]['BoundingBox']
+    width, height = image.size
+    left = int(box['Left'] * width)
+    top = int(box['Top'] * height)
+    right = left + int(box['Width'] * width)
+    bottom = top + int(box['Height'] * height)
+    face_img = image.crop((left, top, right, bottom))
+    if face_img.mode != 'RGB':
+        face_img = face_img.convert('RGB')
+    buf = BytesIO()
+    face_img.save(buf, format='JPEG')
+    return buf.getvalue(), None
 @app.route('/upload-image', methods=['POST'])
 def upload_image():
     image_file = request.files['image']
@@ -37,7 +53,9 @@ def compare_face_db():
     with tempfile.NamedTemporaryFile(delete=True) as temp:
         target_file.save(temp.name)
         temp.seek(0)
-        image_bytes = temp.read()
+        image_bytes, err = extract_face_bytes(temp.read())
+        if err:
+            return jsonify({'error': err}), 400
 
         try:
             response = rekognition.compare_faces(
@@ -138,11 +156,14 @@ def compare_faces_direct():
     with tempfile.NamedTemporaryFile(delete=True) as temp1, tempfile.NamedTemporaryFile(delete=True) as temp2:
         image1_file.save(temp1.name)
         temp1.seek(0)
-        image1_bytes = temp1.read()
+        image1_bytes, err1 = extract_face_bytes(temp1.read())
 
         image2_file.save(temp2.name)
         temp2.seek(0)
-        image2_bytes = temp2.read()
+        image2_bytes, err2 = extract_face_bytes(temp2.read())
+
+        if err1 or err2:
+            return jsonify({'error': err1 or err2}), 400
 
         try:
             response = rekognition.compare_faces(
@@ -329,6 +350,8 @@ def extract_face():
             bottom = top + int(box['Height'] * height)
 
             face_img = img.crop((left, top, right, bottom))
+            if face_img.mode != 'RGB':
+                face_img = face_img.convert('RGB')
 
             # 얼굴만 저장
             temp_face = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -376,14 +399,16 @@ def compare_faces():
         if source_file is None or target_file is None:
             return jsonify({'error':'두개의 이미지를 업로드 하세요.'})
         
-        # 이미지를 Bytes 형식으로 변환
-        source_bytes=BytesIO(source_file.read())
-        target_bytes=BytesIO(target_file.read())
+        # 이미지를 Bytes로 읽기
+        source_bytes, err1 = extract_face_bytes(source_file.read())
+        target_bytes, err2 = extract_face_bytes(target_file.read())
+        if err1 or err2:
+            return jsonify({'error': err1 or err2}), 400
 
         # 호출
         response = rekognition.compare_faces(
-            SourceImage={'Bytes': source_bytes.read()},
-            TargetImage={'Bytes': target_bytes.read()},
+            SourceImage={'Bytes': source_bytes},
+            TargetImage={'Bytes': target_bytes},
             SimilarityThreshold=95
         )
 
@@ -555,9 +580,14 @@ def face_compare():
         source = request.files["source"]
         target = request.files["target"]
 
+        source_bytes, err1 = extract_face_bytes(source.read())
+        target_bytes, err2 = extract_face_bytes(target.read())
+        if err1 or err2:
+            return jsonify({"error": err1 or err2}), 400
+
         response = rekognition.compare_faces(
-            SourceImage={"Bytes": source.read()},
-            TargetImage={"Bytes": target.read()},
+            SourceImage={"Bytes": source_bytes},
+            TargetImage={"Bytes": target_bytes},
             SimilarityThreshold=80
         )
 
