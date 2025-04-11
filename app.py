@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import boto3
 import tempfile
 from PIL import Image
+from io import BytesIO
 
 app = Flask(__name__)
 rekognition = boto3.client('rekognition', region_name='ap-northeast-2')
@@ -344,8 +345,6 @@ def extract_face():
         return jsonify({'error': str(e)}), 500
 
 # =============== 연우님 코드 ===============
-from io import BytesIO
-
 # 얼굴 감지 및 속성 분석
 @app.route('/detect', methods=['POST'])
 def detect_faces():
@@ -470,8 +469,6 @@ def index_faces():
 
 
 # =============== 성현님 코드 ===============
-from botocore.exceptions import NoCredentialsError, ClientError
-
 @app.route("/faces", methods=["POST"])
 def face_storage():
     if "image" not in request.files:
@@ -507,10 +504,7 @@ def face_storage():
             "faceId": face_id
         }), 201
 
-    except NoCredentialsError:
-        return jsonify({"error": "AWS credentials not configured"}), 500
-
-    except ClientError as e:
+    except Exception as e:
         return jsonify({"error": f"AWS Service Error: {str(e)}"}), 500
     
 
@@ -577,7 +571,7 @@ def face_compare():
             "unmatchedCount": len(response.get("UnmatchedFaces", []))
         }), 200
 
-    except ClientError as e:
+    except Exception as e:
         return jsonify({"error": f"Face comparison failed: {str(e)}"}), 500
 
 
