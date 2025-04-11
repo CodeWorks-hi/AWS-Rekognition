@@ -41,8 +41,7 @@ def compare_face_db():
         try:
             response = rekognition.compare_faces(
                 SourceImage={'Bytes': image_bytes},
-                TargetImage={'S3Object': {'Bucket': bucket, 'Name': reference_image}},
-                SimilarityThreshold=95  # 최소값으로 설정해 모든 결과 반환
+                TargetImage={'S3Object': {'Bucket': bucket, 'Name': reference_image}}
             )
 
             if response['FaceMatches']:
@@ -54,7 +53,7 @@ def compare_face_db():
             else:
                 result = {
                     'reference_image': reference_image,
-                    'similarity': None
+                    'similarity': 0
                 }
 
         except Exception as e:
