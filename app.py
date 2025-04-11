@@ -42,7 +42,7 @@ def compare_face_db():
             response = rekognition.compare_faces(
                 SourceImage={'Bytes': image_bytes},
                 TargetImage={'S3Object': {'Bucket': bucket, 'Name': reference_image}},
-                SimilarityThreshold=0  # 최소값으로 설정해 모든 결과 반환
+                SimilarityThreshold=95  # 최소값으로 설정해 모든 결과 반환
             )
 
             if response['FaceMatches']:
@@ -270,7 +270,7 @@ def verify_face():
                     response = rekognition.compare_faces(
                         SourceImage={'Bytes': image_bytes},
                         TargetImage={'S3Object': {'Bucket': bucket, 'Name': image}},
-                        SimilarityThreshold=90
+                        SimilarityThreshold=95
                     )
                     for face_match in response['FaceMatches']:
                         similarity = face_match['Similarity']
@@ -291,8 +291,58 @@ def verify_face():
     })
 
 
-        
 
+# New endpoint for extracting face
+@app.route('/extract-face', methods=['POST'])
+def extract_face():
+    image_file = request.files['image']
+    image_name = image_file.filename
+    face_only_name = f"face_only_{image_name}"
+
+    try:
+        # 원본 이미지 저장
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp:
+            image_file.save(temp.name)
+            image_path = temp.name
+
+        # Rekognition으로 얼굴 위치 감지
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+
+        response = rekognition.detect_faces(
+            Image={'Bytes': image_bytes},
+            Attributes=['DEFAULT']
+        )
+
+        face_details = response.get('FaceDetails', [])
+        if not face_details:
+            return jsonify({'error': 'No face detected'}), 400
+
+        box = face_details[0]['BoundingBox']
+
+        # 이미지 크기 얻기
+        with Image.open(image_path) as img:
+            width, height = img.size
+            left = int(box['Left'] * width)
+            top = int(box['Top'] * height)
+            right = left + int(box['Width'] * width)
+            bottom = top + int(box['Height'] * height)
+
+            face_img = img.crop((left, top, right, bottom))
+
+            # 얼굴만 저장
+            temp_face = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+            face_img.save(temp_face.name)
+
+        # S3에 업로드
+        with open(temp_face.name, 'rb') as f:
+            s3.upload_fileobj(f, bucket, face_only_name, ExtraArgs={'ACL': 'public-read'})
+
+        url = f"https://{bucket}.s3.ap-northeast-2.amazonaws.com/{face_only_name}"
+        return jsonify({'message': 'Face extracted and uploaded', 'face_url': url})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # =============== 연우님 코드 ===============
 from io import BytesIO
@@ -336,7 +386,7 @@ def compare_faces():
         response = rekognition.compare_faces(
             SourceImage={'Bytes': source_bytes.read()},
             TargetImage={'Bytes': target_bytes.read()},
-            SimilarityThreshold=80
+            SimilarityThreshold=95
         )
 
         # 결과 처리
@@ -474,7 +524,7 @@ def verify_face_in_collection():
         response = rekognition.search_faces_by_image(
             CollectionId='codekookiz-face-collection',
             Image={'Bytes': image_bytes},
-            FaceMatchThreshold=90,
+            FaceMatchThreshold=95,
             MaxFaces=1
         )
 
@@ -515,7 +565,7 @@ def face_compare():
         response = rekognition.compare_faces(
             SourceImage={"Bytes": source.read()},
             TargetImage={"Bytes": target.read()},
-            SimilarityThreshold=70
+            SimilarityThreshold=80
         )
 
         matches = [{
