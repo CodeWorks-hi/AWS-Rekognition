@@ -27,6 +27,7 @@ def extract_face_bytes(image_bytes):
     buf = BytesIO()
     face_img.save(buf, format='JPEG')
     return buf.getvalue(), None
+
 @app.route('/upload-image', methods=['POST'])
 def upload_image():
     image_file = request.files['image']
