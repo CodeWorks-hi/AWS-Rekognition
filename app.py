@@ -66,14 +66,17 @@ def compare_face_db():
 
             if response['FaceMatches']:
                 similarity = response['FaceMatches'][0]['Similarity']
+                confidence = response['FaceMatches'][0]['Face']['Confidence']
                 result = {
                     'reference_image': reference_image,
-                    'similarity': similarity
+                    'similarity': similarity,
+                    'confidence': confidence
                 }
             else:
                 result = {
                     'reference_image': reference_image,
-                    'similarity': 0
+                    'similarity': 0,
+                    'confidence': 0
                 }
 
         except Exception as e:
@@ -175,12 +178,15 @@ def compare_faces_direct():
 
             if response['FaceMatches']:
                 similarity = response['FaceMatches'][0]['Similarity']
+                confidence = response['FaceMatches'][0]['Face']['Confidence']
                 result = {
-                    'similarity': similarity
+                    'similarity': similarity,
+                    'confidence': confidence
                 }
             else:
                 result = {
-                    'similarity': None
+                    'similarity': None,
+                    'confidence': None
                 }
 
         except Exception as e:
