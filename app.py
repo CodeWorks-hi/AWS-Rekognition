@@ -104,15 +104,15 @@ def analyze_expression():
     image_name = image_file.filename
 
     try:
-        # 이미지를 로컬에 저장해서 크기 계산
+        # 이미지를 로컬에 저장
         with tempfile.NamedTemporaryFile(delete=False) as temp:
             image_file.save(temp.name)
             image_path = temp.name
-            with Image.open(image_path) as img:
-                img_width, img_height = img.size
 
         with open(image_path, 'rb') as f:
-            image_bytes = f.read()
+            image_bytes, err = extract_face_bytes(f.read())
+            if err:
+                return jsonify({'error': err}), 400
 
         response = rekognition.detect_faces(
             Image={'Bytes': image_bytes},
@@ -125,10 +125,10 @@ def analyze_expression():
             top_emotion = emotions[0]
             box = face['BoundingBox']
             bounding_box_pixels = {
-                'left': int(box['Left'] * img_width),
-                'top': int(box['Top'] * img_height),
-                'width': int(box['Width'] * img_width),
-                'height': int(box['Height'] * img_height)
+                'left': int(box['Left'] * 100),
+                'top': int(box['Top'] * 100),
+                'width': int(box['Width'] * 100),
+                'height': int(box['Height'] * 100)
             }
 
             results.append({
@@ -282,11 +282,12 @@ def detect_id_text():
 def verify_face():
     target_file = request.files['image']
 
-    # 이미지 파일을 임시 디렉토리에 저장하고 바이트로 읽기
     with tempfile.NamedTemporaryFile(delete=True) as temp:
         target_file.save(temp.name)
         temp.seek(0)
-        image_bytes = temp.read()
+        image_bytes, err = extract_face_bytes(temp.read())
+        if err:
+            return jsonify({'error': err}), 400
 
         try:
             objects = s3.list_objects_v2(Bucket=bucket)
@@ -313,10 +314,8 @@ def verify_face():
                     continue
         except Exception as e:
             return jsonify({'error': str(e)}), 500
-    return jsonify({
-        'verified': False,
-        'message': '인증에 실패하였습니다.'
-    })
+
+    return jsonify({'verified': False, 'message': '인증에 실패하였습니다.'})
 
 
 
@@ -416,7 +415,7 @@ def compare_faces():
         response = rekognition.compare_faces(
             SourceImage={'Bytes': source_bytes},
             TargetImage={'Bytes': target_bytes},
-            SimilarityThreshold=95
+            SimilarityThreshold=80
         )
 
         # 결과 처리
@@ -463,26 +462,33 @@ create_collection(collection_id, region)
 
 # 얼굴 인덱싱 - 얼굴을 감지하고, 해당 얼굴의 특징을 추출하여 **컬렉션(Collection)**에 저장하는 작업
 # 얼굴 데이터를 시스템에 등록하여 인증 시스템 구축 / 여러 사람의 얼굴 데이터를 저장하여 관리
-@app.route('/index',methods=['POST'])
+@app.route('/index', methods=['POST'])
 def index_faces():
-    # 클라이언트에서 이미지 파일 가져오기
-    image_file=request.files['image']
-    image_name=image_file.filename
-    collection_id='codekookiz-face-collection' # 컬렉션 ID(없으면 생성)
+    image_file = request.files['image']
+    image_name = image_file.filename
+    collection_id = 'codekookiz-face-collection'
 
     try:
-        # S3에 이미지 업로드
-        s3.upload_fileobj(image_file, bucket, image_name, ExtraArgs={'ACL': 'public-read'})
+        # 파일을 한 번 읽어 메모리에 저장
+        file_bytes = image_file.read()
+        image_stream = BytesIO(file_bytes)  # S3 업로드용
+        image_for_face = BytesIO(file_bytes)  # Rekognition용
 
-        # Rekognition 얼굴 인덱싱 호출
+        # S3에 업로드
+        s3.upload_fileobj(image_stream, bucket, image_name, ExtraArgs={'ACL': 'public-read'})
+
+        # Rekognition 인덱싱용 얼굴 바이트 추출
+        image_bytes, err = extract_face_bytes(image_for_face.read())
+        if err:
+            return jsonify({'error': err}), 400
+
         response = rekognition.index_faces(
             CollectionId=collection_id,
-            Image={'S3Object': {'Bucket': bucket, 'Name': image_name}},
-            ExternalImageId=image_name.split('.')[0],  # 외부 이미지 ID (고유값)
+            Image={'Bytes': image_bytes},
+            ExternalImageId=image_name.split('.')[0],
             DetectionAttributes=['ALL']
         )
 
-        # 결과 반환
         face_records = response.get('FaceRecords', [])
         indexed_faces = [
             {
@@ -492,8 +498,8 @@ def index_faces():
             }
             for record in face_records
         ]
-        
-        return jsonify({'IndexedFaces': indexed_faces}) # 고유 ID로 나옴
+
+        return jsonify({'IndexedFaces': indexed_faces})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -510,17 +516,24 @@ def face_storage():
     image_name = image_file.filename
     collection_id = 'codekookiz-face-collection'
 
+    # ✅ 한 번만 읽고 복사
+    file_bytes = image_file.read()
+    image_stream = BytesIO(file_bytes)      # S3 업로드용
+    image_for_face = BytesIO(file_bytes)    # Rekognition 용
+
     try:
-        # S3에 이미지 업로드
-        s3.upload_fileobj(image_file, bucket, image_name, ExtraArgs={'ACL': 'public-read'})
+        s3.upload_fileobj(image_stream, bucket, image_name, ExtraArgs={'ACL': 'public-read'})
     except Exception as e:
         return jsonify({"error": f"Failed to upload image to S3: {str(e)}"}), 500
 
     try:
-        # Rekognition에 얼굴 등록
+        image_bytes, err = extract_face_bytes(image_for_face.read())
+        if err:
+            return jsonify({'error': err}), 400
+
         response = rekognition.index_faces(
             CollectionId=collection_id,
-            Image={'S3Object': {'Bucket': bucket, 'Name': image_name}},
+            Image={'Bytes': image_bytes},
             ExternalImageId=image_name.split('.')[0],
             DetectionAttributes=['ALL']
         )
@@ -543,7 +556,9 @@ def face_storage():
 @app.route('/verify-face-in-collection', methods=['POST'])
 def verify_face_in_collection():
     image_file = request.files['image']
-    image_bytes = image_file.read()
+    image_bytes, err = extract_face_bytes(image_file.read())
+    if err:
+        return jsonify({'error': err}), 400
 
     try:
         response = rekognition.search_faces_by_image(
@@ -569,10 +584,7 @@ def verify_face_in_collection():
                     'message': '인증되었습니다.'
                 })
 
-        return jsonify({
-            'verified': False,
-            'message': '인증에 실패하였습니다.'
-        })
+        return jsonify({'verified': False, 'message': '인증에 실패하였습니다.'})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
