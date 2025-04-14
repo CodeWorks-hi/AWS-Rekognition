@@ -3,6 +3,10 @@ import boto3
 import tempfile
 from PIL import Image
 from io import BytesIO
+import uuid
+import os
+import csv
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 rekognition = boto3.client('rekognition', region_name='ap-northeast-2')
@@ -372,6 +376,108 @@ def extract_face():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+
+# 환경 설정
+COLLECTION_ID = 'codekookiz-face-collection'
+CSV_PATH = 'face_metadata.csv'
+
+
+# CSV 파일 없으면 헤더 생성
+if not os.path.exists(CSV_PATH):
+    with open(CSV_PATH, mode='w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['uuid', 'name', 's3_path'])
+
+@app.route('/upload-face', methods=['POST'])
+def upload_face():
+    if 'image' not in request.files or 'name' not in request.form:
+        return jsonify({'error': 'image file and name required'}), 400
+
+    image_file = request.files['image']
+    user_name = request.form['name']
+
+    # UUID 생성 및 S3 키 설정
+    uuid_str = str(uuid.uuid4())
+    filename = secure_filename(f"{uuid_str}.jpg")
+    s3_key = f"faces/{filename}"
+
+    # S3에 이미지 업로드
+    try:
+        s3.upload_fileobj(image_file, bucket, s3_key, ExtraArgs={'ACL': 'public-read'})
+    except Exception as e:
+        return jsonify({'error': f"S3 upload failed: {str(e)}"}), 500
+
+    # Rekognition 컬렉션에 얼굴 등록
+    try:
+        rekognition.index_faces(
+            CollectionId=COLLECTION_ID,
+            Image={'S3Object': {'Bucket': bucket, 'Name': s3_key}},
+            ExternalImageId=uuid_str,
+            DetectionAttributes=['DEFAULT']
+        )
+    except Exception as e:
+        return jsonify({'error': f"Rekognition indexing failed: {str(e)}"}), 500
+
+    # 메타데이터 CSV에 기록
+    with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow([uuid_str, user_name, f"s3://{bucket}/{s3_key}"])
+
+    return jsonify({
+        'message': 'Face registered successfully',
+        'uuid': uuid_str,
+        'name': user_name,
+        's3_path': f"s3://{bucket}/{s3_key}"
+    })
+
+
+@app.route('/verify-in-collection', methods=['POST'])
+def verify_in_collection():
+    image_file = request.files['image']
+    image_bytes, err = extract_face_bytes(image_file.read())
+    if err:
+        return jsonify({'error': err}), 400
+
+    try:
+        response = rekognition.search_faces_by_image(
+            CollectionId='codekookiz-face-collection',
+            Image={'Bytes': image_bytes},
+            FaceMatchThreshold=95,
+            MaxFaces=1
+        )
+
+        face_matches = response.get('FaceMatches', [])
+        if face_matches:
+            match = face_matches[0]
+            similarity = match['Similarity']
+            face_id = match['Face']['FaceId']
+            external_id = match['Face'].get('ExternalImageId', 'N/A')
+
+            # CSV에서 이름 찾기
+            name = None
+            with open('face_metadata.csv', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    if row['uuid'] == external_id:
+                        name = row['name']
+                        break
+
+            return jsonify({
+                'verified': True,
+                'faceId': face_id,
+                'name': name if name else '이름 없음',
+                'externalImageId': external_id,
+                'similarity': similarity,
+                'message': '인증되었습니다.'
+            })
+
+        return jsonify({'verified': False, 'message': '인증에 실패하였습니다.'})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 
 # =============== 연우님 코드 ===============
 # 얼굴 감지 및 속성 분석
