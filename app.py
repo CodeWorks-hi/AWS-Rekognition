@@ -399,19 +399,46 @@ def upload_face():
 
     # UUID 생성 및 S3 키 설정
     uuid_str = str(uuid.uuid4())
-    filename = secure_filename(f"{uuid_str}.jpg")
+    filename = secure_filename(f"{user_name}_{uuid_str}.jpg")
     s3_key = f"faces/{filename}"
-    
-    # 중복 등록 방지: 이름이 이미 존재하는지 확인
-    with open(CSV_PATH, mode='r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row['name'] == user_name:
-                return jsonify({'message': '이미 등록된 사용자입니다.', 'name': user_name}), 400
+
+    # Read image bytes once
+    image_file_bytes = image_file.read()
+
+    # Rekognition 컬렉션에서 중복 얼굴 검색
+    face_bytes, err = extract_face_bytes(image_file_bytes)
+    if err:
+        return jsonify({'error': err}), 400
+
+    try:
+        response = rekognition.search_faces_by_image(
+            CollectionId=COLLECTION_ID,
+            Image={'Bytes': face_bytes},
+            FaceMatchThreshold=95,
+            MaxFaces=1
+        )
+
+        face_matches = response.get('FaceMatches', [])
+        if face_matches:
+            matched_id = face_matches[0]['Face']['ExternalImageId']
+
+            # CSV에서 해당 uuid에 매핑된 이름 찾기
+            with open(CSV_PATH, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row['uuid'] == matched_id:
+                        return jsonify({
+                            'message': '이미 등록된 사용자입니다.',
+                            'matched_name': row['name'],
+                            'matched_uuid': matched_id
+                        }), 400
+    except Exception as e:
+        return jsonify({'error': f"Rekognition search failed: {str(e)}"}), 500
 
     # S3에 이미지 업로드
     try:
-        s3.upload_fileobj(image_file, bucket, s3_key, ExtraArgs={'ACL': 'public-read'})
+        from io import BytesIO
+        s3.upload_fileobj(BytesIO(image_file_bytes), bucket, s3_key, ExtraArgs={'ACL': 'public-read'})
     except Exception as e:
         return jsonify({'error': f"S3 upload failed: {str(e)}"}), 500
 
