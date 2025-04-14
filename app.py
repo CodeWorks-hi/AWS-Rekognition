@@ -401,6 +401,13 @@ def upload_face():
     uuid_str = str(uuid.uuid4())
     filename = secure_filename(f"{uuid_str}.jpg")
     s3_key = f"faces/{filename}"
+    
+    # 중복 등록 방지: 이름이 이미 존재하는지 확인
+    with open(CSV_PATH, mode='r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row['name'] == user_name:
+                return jsonify({'message': '이미 등록된 사용자입니다.', 'name': user_name}), 400
 
     # S3에 이미지 업로드
     try:
