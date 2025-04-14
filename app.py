@@ -4,14 +4,35 @@ import tempfile
 from PIL import Image
 from io import BytesIO
 import uuid
+from dotenv import load_dotenv
 import os
 import csv
 from werkzeug.utils import secure_filename
+from flask_sqlalchemy import SQLAlchemy
+
+load_dotenv()
 
 app = Flask(__name__)
 rekognition = boto3.client('rekognition', region_name='ap-northeast-2')
 bucket = "rekognition-codekookiz"
 s3 = boto3.client('s3')
+
+user = os.getenv("MYSQL_USER")
+pw = os.getenv("MYSQL_PASSWORD")
+host = os.getenv("MYSQL_HOST")
+port = os.getenv("MYSQL_PORT")
+db = os.getenv("MYSQL_DB")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{user}:{pw}@127.0.0.1:{port}/{db}'
+
+
+db = SQLAlchemy(app)
+
+class FaceMetadata(db.Model):
+    __tablename__ = 'face_metadata'
+    uuid = db.Column(db.String(64), primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    s3_path = db.Column(db.String(1024), nullable=False)
 
 
 def extract_face_bytes(image_bytes):
@@ -380,14 +401,6 @@ def extract_face():
 
 # 환경 설정
 COLLECTION_ID = 'codekookiz-face-collection'
-CSV_PATH = 'face_metadata.csv'
-
-
-# CSV 파일 없으면 헤더 생성
-if not os.path.exists(CSV_PATH):
-    with open(CSV_PATH, mode='w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['uuid', 'name', 's3_path'])
 
 @app.route('/upload-face', methods=['POST'])
 def upload_face():
@@ -417,24 +430,21 @@ def upload_face():
             FaceMatchThreshold=95,
             MaxFaces=1
         )
-
+ 
         face_matches = response.get('FaceMatches', [])
         if face_matches:
             matched_id = face_matches[0]['Face']['ExternalImageId']
-
-            # CSV에서 해당 uuid에 매핑된 이름 찾기
-            with open(CSV_PATH, mode='r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if row['uuid'] == matched_id:
-                        return jsonify({
-                            'message': '이미 등록된 사용자입니다.',
-                            'matched_name': row['name'],
-                            'matched_uuid': matched_id
-                        }), 400
+            record = FaceMetadata.query.filter_by(uuid=matched_id).first()
+            if record:
+                return jsonify({
+                    'message': '이미 등록된 사용자입니다.',
+                    'matched_name': record.name,
+                    'matched_uuid': matched_id
+                }), 400
     except Exception as e:
         return jsonify({'error': f"Rekognition search failed: {str(e)}"}), 500
 
+    # Duplicate check complete: if a duplicate is found above, the function returns here.
     # S3에 이미지 업로드
     try:
         from io import BytesIO
@@ -453,11 +463,17 @@ def upload_face():
     except Exception as e:
         return jsonify({'error': f"Rekognition indexing failed: {str(e)}"}), 500
 
-    # 메타데이터 CSV에 기록
-    with open(CSV_PATH, mode='a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([uuid_str, user_name, f"s3://{bucket}/{s3_key}"])
+    try:
+        existing = FaceMetadata.query.filter_by(uuid=uuid_str).first()
+        if existing:
+            return jsonify({'message': '이미 등록된 사용자입니다. (DB 중복)', 'matched_name': existing.name}), 400
+        new_record = FaceMetadata(uuid=uuid_str, name=user_name, s3_path=f"s3://{bucket}/{s3_key}")
+        db.session.add(new_record)
+        db.session.commit()
+    except Exception as e:
+        return jsonify({'error': f"MySQL insert failed: {str(e)}"}), 500
 
+    
     return jsonify({
         'message': 'Face registered successfully',
         'uuid': uuid_str,
@@ -488,14 +504,9 @@ def verify_in_collection():
             face_id = match['Face']['FaceId']
             external_id = match['Face'].get('ExternalImageId', 'N/A')
 
-            # CSV에서 이름 찾기
-            name = None
-            with open('face_metadata.csv', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if row['uuid'] == external_id:
-                        name = row['name']
-                        break
+            # CSV 대신 DB 조회
+            record = FaceMetadata.query.filter_by(uuid=external_id).first()
+            name = record.name if record else '이름 없음'
 
             return jsonify({
                 'verified': True,
@@ -763,6 +774,9 @@ def face_compare():
     except Exception as e:
         return jsonify({"error": f"Face comparison failed: {str(e)}"}), 500
 
+
+with app.app_context():
+    db.create_all()
 
 if __name__ == '__main__':
     app.run(debug=True)
